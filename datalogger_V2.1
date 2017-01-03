@@ -1,0 +1,500 @@
+//  OK    criar arquivo com a data no momento das 00:00
+//  NAO   offset do sensor de corrente as 00:00
+//  OK    sistema de buffer quando está sem cartão
+//  OK    gravar o buffer quando inserir o cartão novamente
+// verificar o time.h para colocar todos os 60 valores na função e salvar no cartão
+
+#include <TimerOne.h>//Biblioteca interrupcao
+#include <Wire.h> //Biblioteca comunicacao I2C
+#include <DS1302.h>
+#include <SPI.h>
+#include <SD.h> //Biblioteca cartao SD
+//#include  <globalvariables.h>
+//#include  <functions.h>
+//#include  <timer.h>
+//#include  <machinestatus.h>
+
+#define BotHabilitaSD 49
+
+#define RTCOK     44
+#define RTCERR    45
+#define SDOK      46
+#define SDERR     47
+
+#define LedErroGeral 13
+
+const int chipSelect = 53;
+
+File root;
+Time t;
+
+
+#define            set(x)            x   =   1
+#define            clr(x)            x   =   0
+
+//=========================================================================================================================
+//=========================================== DECLARAÇÃO DAS VARIÁVEIS ====================================================
+//=========================================================================================================================
+
+struct   tag_ad
+{
+  unsigned long   vetor [17];
+  unsigned long   vetor_save [17];
+  unsigned long   bkp   [17][60];
+  int            bkpi = 0;
+  int            bkpj = 0;
+} ad;
+
+struct   tag_cnt
+{
+  int geral;
+  int ad;
+} cnt;
+
+struct   tag_RTC
+{
+  int   horario[3];
+  int   data[3];
+  //   char  arquivo[] = "datalog.txt";
+  int   dia;
+  int   mes;
+  int   ano;
+  int   hora;
+  int   minuto;
+  int   seg_aux;
+  int   seg;
+} RTC;
+
+struct   tag_flag
+{
+  struct
+  {
+    bool     ok;
+    bool     err;
+    bool     ate;
+    bool     escrita;
+    bool     bkp;
+    bool     nocard;
+  } sd;
+
+  struct
+  {
+    bool     ok;
+    bool     err;
+  } rtc;
+
+  bool start_leitura;
+  bool first_run;
+  bool bomba;
+
+} flag;
+
+
+
+//=========================================================================================================================
+//=========================================== ATUALIZA STATUS DOS LEDS ====================================================
+//=========================================================================================================================
+inline void Saidas (void)
+{
+  if  (flag.sd.err)     {
+    digitalWrite(47, 1);
+    digitalWrite(46, 0);
+    clr(flag.sd.ok);
+    clr(flag.sd.ate);
+  }
+  if  (flag.sd.ok)      {
+    digitalWrite(47, 0);
+    digitalWrite(46, 1);
+    clr(flag.sd.err);
+    clr(flag.sd.ate);
+  }
+  if  (flag.sd.ate)     {
+    digitalWrite(47, 1);
+    digitalWrite(46, 1);
+    clr(flag.sd.err);
+    clr(flag.sd.ok);
+  }
+
+  if  (flag.rtc.err)    {
+    digitalWrite(45, 1);
+    digitalWrite(44, 0);
+  }
+  if  (flag.rtc.ok)     {
+    digitalWrite(45, 0);
+    digitalWrite(44, 1);
+  }
+
+  if  (flag.bomba)      {
+    analogWrite(5, 80);
+  }
+  else                  {
+    analogWrite(5, 0 );
+  }
+}
+
+
+//=========================================================================================================================
+//=========================================== CRIA O ARQUIVO CASO AINDA NÃO EXISTA ========================================
+//=========================================================================================================================
+inline   void CriaFile (void)
+{
+  if (SD.exists("datalog.txt"))
+  {
+    Serial.println("exists.");
+  }
+
+  else
+  {
+    Serial.println("doesn't exist.");
+    Serial.println("Creating new file");
+    Serial.println("datalog.txt");
+    File dataFile = SD.open("datalog.txt", FILE_WRITE);
+    delay(5);
+    dataFile.close();
+    delay(5);
+  }
+  clr(flag.first_run);
+}
+
+
+
+//=========================================================================================================================
+//=========================================== FUNÇÃO QUE PERMITE A RETURADA DO CARTÃO SD ==================================
+//=========================================================================================================================
+inline void RetiraCartao (void)
+{
+  if (digitalRead(49))  // verifica se o botão está em modo ON
+  {
+    if (flag.sd.nocard)  // quando o botão for acionado, faz a verificação apenas uma vez
+    {
+      // =================== faz a verificação do cartão SD quando inserido novamente
+      while (!flag.sd.ok)
+      {
+        if (!SD.begin(53))
+        {
+          Serial.println("initialization failed!");
+          set(flag.sd.err);
+          clr(flag.sd.ok);
+          clr(flag.sd.ate);
+        }
+        else
+        {
+          Serial.println("initialization OK!");
+          clr(flag.sd.err);
+          set(flag.sd.ok);
+          clr(flag.sd.ate);
+
+          clr(flag.sd.nocard);
+        }
+      }
+      if (flag.sd.bkp)  // verifica a existência de um arquivo de bkp
+      {
+        // =================== construção da string a ser gravada no arquivo (tudo)
+        for (int aux_j = 0; aux_j < ad.bkpj; aux_j++)
+        {
+          File dataFile = SD.open("datalog.txt", FILE_WRITE);
+
+          Serial.println("gravando bkp");
+
+          dataFile.print(ad.bkp[0][aux_j], DEC);  dataFile.print("/");  dataFile.print(ad.bkp[1][aux_j], DEC);  dataFile.print("/");  dataFile.print(ad.bkp[2][aux_j], DEC);  dataFile.print(",");
+          dataFile.print(ad.bkp[3][aux_j], DEC);  dataFile.print(":");  dataFile.print(ad.bkp[4][aux_j], DEC);  dataFile.print(",");
+          dataFile.print(ad.bkp[5][aux_j], DEC);  dataFile.print(",");
+          dataFile.print(ad.bkp[6][aux_j], DEC);  dataFile.print(",");
+          dataFile.print(ad.bkp[7][aux_j], DEC);  dataFile.print(",");
+          dataFile.print(ad.bkp[8][aux_j], DEC);  dataFile.print(",");
+          dataFile.print(ad.bkp[9][aux_j], DEC);  dataFile.print(",");
+          dataFile.print(ad.bkp[10][aux_j], DEC); dataFile.print(",");
+          dataFile.print(ad.bkp[11][aux_j], DEC); dataFile.print(",");
+          dataFile.print(ad.bkp[12][aux_j], DEC); dataFile.print(",");
+          dataFile.print(ad.bkp[13][aux_j], DEC); dataFile.print(",");
+          dataFile.print(ad.bkp[14][aux_j], DEC); dataFile.print(",");
+          dataFile.print(ad.bkp[15][aux_j], DEC); dataFile.print(",");
+          dataFile.println(ad.bkp[16][aux_j], DEC);
+
+
+          dataFile.close();
+          delay(10);
+
+        }
+      }
+      clr(flag.sd.bkp);
+      clr(ad.bkpj);
+    }
+  }
+  else
+  {
+    set(flag.sd.nocard);
+
+    set(flag.sd.ate);
+    clr(flag.sd.ok);
+    clr(flag.sd.ok);
+  }
+}
+
+
+
+//=========================================================================================================================
+//=========================================== FUNÇÃO EXECUTADA A CADA CICLO DE INTERRUPÇÃO ================================
+//=========================================================================================================================
+inline void TMR (void)
+{
+
+  // =================== temporizador para ligar e desligar a bomba de água
+  if (((cnt.ad >= 16) && (cnt.ad <= 48)) && ((RTC.horario[0] >= 7) && (RTC.horario[0] <= 19)))
+  {
+    set(flag.bomba);
+  }
+  else
+  {
+    clr(flag.bomba);
+  }
+
+  // =================== a cada ciclo de interrupção faz a leitura de todos os sensores de temperatura e armazena em um vetor
+  for (int analogPin = 0; analogPin < 12; analogPin++)
+  {
+    int sensor = analogRead(analogPin);
+    ad.vetor[analogPin] += sensor;
+  }
+
+  cnt.ad++;
+
+  if (cnt.ad == 64)
+  {
+    clr(cnt.ad);
+
+    ad.vetor[0]   =  ad.vetor[0]    >> 6;
+    ad.vetor[1]   =  ad.vetor[1]    >> 6;
+    ad.vetor[2]   =  ad.vetor[2]    >> 6;
+    ad.vetor[3]   =  ad.vetor[3]    >> 6;
+    ad.vetor[4]   =  ad.vetor[4]    >> 6;
+    ad.vetor[5]   =  ad.vetor[5]    >> 6;
+    ad.vetor[6]   =  ad.vetor[6]    >> 6;
+    ad.vetor[7]   =  ad.vetor[7]    >> 6;
+    ad.vetor[8]   =  ad.vetor[8]    >> 6;
+    ad.vetor[9]   =  ad.vetor[9]    >> 6;
+    ad.vetor[10]  =  ad.vetor[10]   >> 6;
+    ad.vetor[11]  =  ad.vetor[11]   >> 6;
+
+
+    //     =================== so cartão NÃO estiver presente, faça:
+    if (flag.sd.nocard)
+    {
+      set(flag.sd.bkp); // seta o flag de bkp gerado
+      Serial.println("fazendo bkp");
+
+      ad.bkp[0][ad.bkpj]  = RTC.data[0];     ad.bkp[1][ad.bkpj] = RTC.data[1];    ad.bkp[2][ad.bkpj] = RTC.data[2];
+      ad.bkp[3][ad.bkpj]  = RTC.horario[0];  ad.bkp[4][ad.bkpj] = RTC.horario[1];
+      ad.bkp[5][ad.bkpj]  = (ad.vetor[0]);
+      ad.bkp[6][ad.bkpj]  = (ad.vetor[1]);
+      ad.bkp[7][ad.bkpj]  = (ad.vetor[2]);
+      ad.bkp[8][ad.bkpj]  = (ad.vetor[3]);
+      ad.bkp[9][ad.bkpj]  = (ad.vetor[4]);
+      ad.bkp[10][ad.bkpj] = (ad.vetor[5]);
+      ad.bkp[11][ad.bkpj] = (ad.vetor[6]);
+      ad.bkp[12][ad.bkpj] = (ad.vetor[7]);
+      ad.bkp[13][ad.bkpj] = (ad.vetor[8]);
+      ad.bkp[14][ad.bkpj] = (ad.vetor[9]);
+      ad.bkp[15][ad.bkpj] = (ad.vetor[10]);
+      ad.bkp[16][ad.bkpj] = (ad.vetor[11]);
+
+      for (int analogPin = 0; analogPin < 12; analogPin++)
+      {
+        clr(ad.vetor[analogPin]);
+      }
+
+      ad.bkpj ++; //adiciona uma nova linha na matriz de valores de bkp
+    }
+
+    // =================== so cartão estiver presente, faça:
+    else
+    {
+      SD.begin(53);
+      File dataFile = SD.open("datalog.txt", FILE_WRITE);
+      if (dataFile)
+      {
+
+
+
+        Serial.println("gravacao normal");
+        dataFile.print(RTC.data[0], DEC);  dataFile.print("/");  dataFile.print(RTC.data[1], DEC);  dataFile.print("/");  dataFile.print(RTC.data[2], DEC);  dataFile.print(",");
+        dataFile.print(RTC.horario[0], DEC);  dataFile.print(":");  dataFile.print(RTC.horario[1], DEC);  dataFile.print(",");
+        dataFile.print(ad.vetor[0]);  dataFile.print(",");
+        dataFile.print(ad.vetor[1]);  dataFile.print(",");
+        dataFile.print(ad.vetor[2]);  dataFile.print(",");
+        dataFile.print(ad.vetor[3]);  dataFile.print(",");
+        dataFile.print(ad.vetor[4]);  dataFile.print(",");
+        dataFile.print(ad.vetor[5]);  dataFile.print(",");
+        dataFile.print(ad.vetor[6]);  dataFile.print(",");
+        dataFile.print(ad.vetor[7]);  dataFile.print(",");
+        dataFile.print(ad.vetor[8]);  dataFile.print(",");
+        dataFile.print(ad.vetor[9]);  dataFile.print(",");
+        dataFile.print(ad.vetor[10]); dataFile.print(",");
+        dataFile.println(ad.vetor[11]);
+
+        dataFile.close();
+
+        for (int analogPin = 0; analogPin < 12; analogPin++)
+        {
+          clr(ad.vetor[analogPin]);
+        }
+      }
+    }
+  }
+  Saidas();
+}
+
+
+//=========================================================================================================================
+//=========================================== FUNÇÃO DA INTERRUPÇÃO =======================================================
+//=========================================================================================================================
+void Timer()
+{
+  DS1302 rtc(2, 3, 4);
+  digitalWrite( LedErroGeral, digitalRead(LedErroGeral) ^ 1);
+
+  t = rtc.getTime();
+
+  RTC.horario[0]  = (t.hour);
+  RTC.horario[1]  = (t.min);
+  RTC.horario[2]  = (t.sec);
+  RTC.data[0]     = (t.date);
+  RTC.data[1]     = (t.mon);
+  RTC.data[2]     = (t.year);
+
+  //  if (flag.first_run)
+  //  {
+  //    CriaFile();
+  //  }
+  RetiraCartao();
+  TMR();
+}
+
+
+
+
+//=========================================================================================================================
+//=========================================== ROTINA DO CARTÃO SD =========================================================
+//=========================================================================================================================
+void printDirectory(File dir, int numTabs) {
+  while (true)
+  {
+    File entry =  dir.openNextFile();
+    if (! entry) {
+      break;
+    }
+    for (uint8_t i = 0; i < numTabs; i++) {
+      Serial.print('\t');
+    }
+    Serial.print(entry.name());
+    if (entry.isDirectory()) {
+      Serial.println("/");
+      printDirectory(entry, numTabs + 1);
+    } else {
+      // files have sizes, directories do not
+      Serial.print("\t\t");
+      Serial.println(entry.size(), DEC);
+    }
+    entry.close();
+  }
+}
+
+
+//=========================================================================================================================
+//=========================================== SETUP =======================================================================
+//=========================================================================================================================
+void setup()
+{
+  // ---------------------- inicialização da comunicação serial
+  Serial.begin(9600);
+  // ---- Definição dos pinos analógicos (ADs) ----
+  pinMode(A0,   INPUT);// sen temp placa modificada inferior
+  pinMode(A1,   INPUT);// sen temp placa modificada central
+  pinMode(A2,   INPUT);// sen temp placa modificada superior
+  pinMode(A3,   INPUT);// sen temp placa original inferior
+  pinMode(A4,   INPUT);// sen temp placa original central
+  pinMode(A5,   INPUT);// sen temp placa original superior
+  pinMode(A6,   INPUT);// sen temp agua quente
+  pinMode(A7,   INPUT);// sen temp agua fria
+  pinMode(A8,   INPUT);// sen temp ambiente
+  pinMode(A9,   INPUT);// Corrente
+  pinMode(A10,  INPUT);// Tensão placa modificada
+  pinMode(A11,  INPUT);// Tensão placa original
+  pinMode(A12,  INPUT);// LIVRE
+  pinMode(A13,  INPUT);// LIVRE
+  pinMode(A14,  INPUT);// LIVRE
+  pinMode(A15,  INPUT);// LIVRE
+
+  // ---- Definição dos pinos digitais (IOs) ----
+  pinMode(BotHabilitaSD,  INPUT );
+  pinMode(RTCOK,          OUTPUT);
+  pinMode(RTCERR,         OUTPUT);
+  pinMode(SDOK,           OUTPUT);
+  pinMode(SDERR,          OUTPUT);
+
+  pinMode(53, OUTPUT);
+  digitalWrite(53, HIGH);
+  // ---- Definição dos pinos de PWM ----
+  //
+  //pinMode(Bomba,  OUTPUT);
+
+
+
+
+  // ---- verificação do cartão RTC ----
+  DS1302 rtc(2, 3, 4);
+  rtc.halt(false);
+
+  //  rtc.writeProtect(false);
+  // rtc.setDOW(THURSDAY);        // Set Day-of-Week to FRIDAY
+  //rtc.setTime(17, 41, 0);     // Set the time to 12:00:00 (24hr format)
+  //  rtc.setDate(1, 1, 2017);   // Set the date to August 6th, 2010
+  rtc.writeProtect(true);
+
+  t = rtc.getTime();
+  RTC.seg = t.sec;
+  RTC.seg_aux = RTC.seg;
+  while (RTC.seg_aux == RTC.seg)
+  {
+    t = rtc.getTime();
+    RTC.seg = t.sec;
+  }
+  set(flag.rtc.ok);
+
+
+  // ---- verificação do cartão SD ----
+
+  set(flag.first_run);
+  pinMode(chipSelect, OUTPUT);
+  if (!SD.begin(chipSelect))
+  {
+    Serial.println("initialization failed!");
+    set(flag.sd.err);
+  }
+  else
+  {
+    Serial.println("initialization OK!");
+    set(flag.sd.ok);
+  }
+  root = (SD.open("/")); // apresenta todos os arquivos presentes no cartao SD
+  printDirectory(root, 0);
+
+
+
+  // ---------------------- inicialização da interrupção (64 vezes por minuto)
+
+  Timer1.initialize(937500); // determina o tempo da interrupcao em 1000000 microsegundos ou 1s //937500
+  Timer1.attachInterrupt(Timer); // chama a funcao erro a cada interrupcao
+}
+
+
+
+
+
+
+//=========================================================================================================================
+//=========================================== LOOP ========================================================================
+//=========================================================================================================================
+void loop()
+{
+
+}
